@@ -1,0 +1,263 @@
+/**
+ * SISTEMA DE GESTÃO DE VEÍCULOS - BACK-END (REVISADO)
+ * * Regras de Negócio Implementadas:
+ * 1. ADM Único: tem.vdcconf@grupodass.com.br (Permissões totais).
+ * 2. Reservas: Públicas para criação, edição restrita ao Criador ou ADM.
+ * 3. Módulo 'Utilizadores': Removido conforme solicitado.
+ * 4. Frota: Diferenciação entre assentos de passageiros e motorista.
+ */
+
+const SPREADSHEET_ID = "1AWR7vh6ozJBFYupCThgbUJuovDitZPOXTeUEYgqYUEA"; 
+const ADMIN_EMAIL = "tem.vdcconf@grupodass.com.br";
+
+/**
+ * Auxiliar para acesso centralizado à planilha e abas.
+ */
+function getSS() {
+  try {
+    return SpreadsheetApp.openById(SPREADSHEET_ID);
+  } catch(e) {
+    return SpreadsheetApp.getActiveSpreadsheet();
+  }
+}
+
+function getSheet(name) {
+  const ss = getSS();
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) throw new Error("Aba '" + name + "' não encontrada na planilha.");
+  return sheet;
+}
+
+/**
+ * Função de entrada do Web App.
+ */
+function doGet(e) {
+  return HtmlService.createTemplateFromFile("index")
+    .evaluate()
+    .setTitle("Dass - Gestão de Veículos")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * --- IDENTIFICAÇÃO E PERMISSÕES ---
+ */
+function getUserInfo() {
+  try {
+    const email = Session.getActiveUser().getEmail().toLowerCase() || Session.getEffectiveUser().getEmail().toLowerCase();
+    const isAdmin = (email === ADMIN_EMAIL.toLowerCase());
+    
+    return { 
+      email: email, 
+      nivel: isAdmin ? "ADM" : "USER",
+      success: true 
+    };
+  } catch (e) {
+    return { email: "", nivel: "USER", success: false, error: e.toString() };
+  }
+}
+
+/**
+ * --- GESTÃO DE FROTA (ACESSO ADM PARA EDIÇÃO) ---
+ */
+function getVehicles() {
+  try {
+    const data = getSheet("Veiculos").getDataRange().getValues();
+    if (data.length <= 1) return [];
+    
+    data.shift(); // Remove cabeçalho
+    return data
+      .filter(row => row[0]) 
+      .map(row => ({ 
+        placa: row[0].toString().toUpperCase(), 
+        modelo: row[1] || "N/A", 
+        status: row[2] || "Inativo", 
+        obs: row[3] || "", 
+        assentos: parseInt(row[4]) || 0, // Apenas passageiros
+        img: row[5] || ""
+      }));
+  } catch (e) { 
+    return []; 
+  }
+}
+
+function saveVehicle(v) {
+  const info = getUserInfo();
+  if (info.nivel !== "ADM") throw new Error("Acesso negado: Apenas o administrador pode gerenciar a frota.");
+
+  const sheet = getSheet("Veiculos");
+  const data = sheet.getDataRange().getValues();
+  const placa = v.placa.toString().toUpperCase().trim();
+  let rowIndex = -1;
+
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0].toString().toUpperCase().trim() === placa) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+
+  const rowValues = [placa, v.modelo, v.status, v.obs, v.assentos, v.img];
+
+  if (rowIndex > -1) {
+    sheet.getRange(rowIndex, 1, 1, 6).setValues([rowValues]);
+    return { success: true, message: "Veículo atualizado com sucesso!" };
+  } else {
+    sheet.appendRow(rowValues);
+    return { success: true, message: "Novo veículo adicionado à frota!" };
+  }
+}
+
+function deleteVehicle(placa) {
+  const info = getUserInfo();
+  if (info.nivel !== "ADM") throw new Error("Acesso negado.");
+
+  const sheet = getSheet("Veiculos");
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0].toString().toUpperCase() === placa.toUpperCase()) {
+      sheet.deleteRow(i + 1);
+      return { success: true, message: "Veículo removido." };
+    }
+  }
+  throw new Error("Veículo não encontrado.");
+}
+
+/**
+ * --- GESTÃO DE MOTORISTAS (RESTRITO ADM) ---
+ */
+function getDrivers() {
+  try {
+    const data = getSheet("Motoristas").getDataRange().getValues();
+    if (data.length <= 1) return [];
+    data.shift();
+    // Retorna apenas ativos para o seletor de reservas
+    return data.filter(row => row[4] === "Ativo").map(row => ({ 
+      nome: row[0], 
+      cracha: row[1]
+    }));
+  } catch (e) { return []; }
+}
+
+function getFullMotoristasList() {
+  const info = getUserInfo();
+  if (info.nivel !== "ADM") throw new Error("Acesso restrito ao administrador.");
+
+  const data = getSheet("Motoristas").getDataRange().getValues();
+  if (data.length <= 1) return [];
+  data.shift();
+  return data.map(row => ({ 
+    nome: row[0], 
+    cracha: row[1], 
+    cnh: row[2], 
+    validade: row[3] instanceof Date ? row[3].toISOString().split('T')[0] : row[3], 
+    status: row[4],
+    tipo: row[5] // Categoria CNH: [A], [B], [A e B]
+  }));
+}
+
+function saveDriver(d) {
+  const info = getUserInfo();
+  if (info.nivel !== "ADM") throw new Error("Acesso negado.");
+
+  const sheet = getSheet("Motoristas");
+  const data = sheet.getDataRange().getValues();
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1].toString() === d.cracha.toString()) { rowIndex = i + 1; break; }
+  }
+  
+  const rowValues = [d.nome, d.cracha, d.cnh, new Date(d.validade), d.status, d.tipo];
+  
+  if (rowIndex > -1) {
+    sheet.getRange(rowIndex, 1, 1, 6).setValues([rowValues]);
+    return { success: true, message: "Dados do condutor atualizados!" };
+  } else {
+    sheet.appendRow(rowValues);
+    return { success: true, message: "Condutor cadastrado com sucesso!" };
+  }
+}
+
+/**
+ * --- GESTÃO DE RESERVAS ---
+ */
+function getBookings() {
+  try {
+    const data = getSheet("Reservas").getDataRange().getValues();
+    if (data.length <= 1) return [];
+    data.shift();
+    return data.map(row => ({
+      id: row[0], 
+      veiculo: row[1], 
+      motorista: row[2], 
+      usuario: row[3], // E-mail do criador
+      inicio: row[4] instanceof Date ? row[4].toISOString() : row[4],
+      fim: row[5] instanceof Date ? row[5].toISOString() : row[5],
+      status: row[6], 
+      motivo: row[10] || "", 
+      passageiros: row[11] || "",
+      origem: row[12] || "", 
+      destino: row[13] || ""
+    }));
+  } catch(e) { return []; }
+}
+
+function createNewBooking(data) {
+  const sheet = getSheet("Reservas");
+  const userEmail = Session.getActiveUser().getEmail().toLowerCase();
+  const id = "RES-" + Math.floor(Date.now() / 1000);
+  
+  try {
+    sheet.appendRow([
+      id, 
+      data.veiculo, 
+      data.motorista, 
+      userEmail,
+      new Date(data.inicio), 
+      new Date(data.fim), 
+      "Agendado", 
+      "", "", 
+      new Date(), 
+      data.motivo, 
+      data.passageiros, 
+      data.origem, 
+      data.destino
+    ]);
+    return { success: true, message: "Reserva efetuada com sucesso!" };
+  } catch (e) { 
+    return { success: false, message: "Erro ao gravar reserva: " + e.message }; 
+  }
+}
+
+function deleteBooking(id) {
+  const info = getUserInfo();
+  const sheet = getSheet("Reservas");
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === id) {
+      const criador = data[i][3].toString().toLowerCase();
+      // Apenas o ADM ou o Próprio Criador podem deletar
+      if (info.nivel === "ADM" || info.email === criador) {
+        sheet.deleteRow(i + 1);
+        return { success: true, message: "Reserva cancelada com sucesso." };
+      } else {
+        throw new Error("Permissão negada: Você não é o autor desta reserva.");
+      }
+    }
+  }
+  throw new Error("Reserva não encontrada.");
+}
+
+/**
+ * --- AUXILIARES ---
+ */
+function getColaboradorByCracha(cracha) {
+  try {
+    const sheet = getSheet("Bc colaborador");
+    const data = sheet.getDataRange().getValues();
+    data.shift();
+    const colab = data.find(r => r[0].toString() === cracha.toString());
+    return colab ? { success: true, nome: colab[1] } : { success: false };
+  } catch(e) { return { success: false }; }
+}
